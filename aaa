@@ -1,0 +1,397 @@
+import React, { useEffect, useRef, useState } from "react";
+
+// Zombie Dodge — a tiny canvas game in one file
+// Controls: Arrow keys / WASD to drive. Avoid zombies.
+// Space = pause, R = restart. Works with keyboard; click canvas to focus.
+
+const WIDTH = 900;
+const HEIGHT = 540;
+
+// Utility helpers
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function dist(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return Math.hypot(dx, dy); }
+
+export default function ZombieDodgeGame() {
+  const canvasRef = useRef(null);
+  const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [score, setScore] = useState(0);
+  const [best, setBest] = useState(() => Number(localStorage.getItem("zombie_dodge_best") || 0));
+  const [state, setState] = useState("menu"); // menu | playing | gameover
+  const [difficulty, setDifficulty] = useState("Normal"); // Easy | Normal | Hard
+  const keysRef = useRef(new Set());
+  const gameRef = useRef(null);
+
+  useEffect(() => {
+    const onDown = (e) => { keysRef.current.add(e.key.toLowerCase()); };
+    const onUp = (e) => { keysRef.current.delete(e.key.toLowerCase()); };
+    const onBlur = () => { keysRef.current.clear(); };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
+  // Core game objects
+  function initGame() {
+    const diff = difficulty;
+    const zombieSpeed = diff === "Easy" ? 0.7 : diff === "Hard" ? 1.35 : 1.0;
+    const spawnEvery = diff === "Easy" ? 950 : diff === "Hard" ? 600 : 800; // ms
+    const maxZ = diff === "Easy" ? 35 : diff === "Hard" ? 80 : 60;
+
+    gameRef.current = {
+      player: { x: WIDTH / 2, y: HEIGHT / 2, vx: 0, vy: 0, angle: 0, size: 16, maxSpeed: 3.6, accel: 0.23, friction: 0.95 },
+      zombies: [],
+      particles: [],
+      lastSpawn: 0,
+      spawnEvery,
+      maxZ,
+      zombieSpeed,
+      time: 0,
+    };
+    setScore(0);
+  }
+
+  function spawnZombie(game) {
+    if (game.zombies.length >= game.maxZ) return;
+    const edge = Math.floor(rand(0, 4));
+    let x, y;
+    if (edge === 0) { x = -20; y = rand(0, HEIGHT); }
+    else if (edge === 1) { x = WIDTH + 20; y = rand(0, HEIGHT); }
+    else if (edge === 2) { x = rand(0, WIDTH); y = -20; }
+    else { x = rand(0, WIDTH); y = HEIGHT + 20; }
+    const r = rand(10, 18);
+    game.zombies.push({ x, y, r, speed: game.zombieSpeed * rand(0.9, 1.2), wobble: rand(0, Math.PI * 2), wobbleSpeed: rand(0.005, 0.02) });
+  }
+
+  function addParticles(game, x, y, color = "#22c55e", count = 10) {
+    for (let i = 0; i < count; i++) {
+      game.particles.push({ x, y, vx: rand(-2, 2), vy: rand(-2, 2), life: rand(20, 40), color });
+    }
+  }
+
+  function drawCar(ctx, p) {
+    // Simple top-down car: body + wheels
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle);
+
+    // shadow
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = "black";
+    ctx.beginPath();
+    ctx.ellipse(0, 6, 18, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // wheels
+    ctx.fillStyle = "#1f2937";
+    ctx.fillRect(-14, -10, 6, 4);
+    ctx.fillRect(8, -10, 6, 4);
+    ctx.fillRect(-14, 8, 6, 4);
+    ctx.fillRect(8, 8, 6, 4);
+
+    // body
+    const grad = ctx.createLinearGradient(0, -16, 0, 16);
+    grad.addColorStop(0, "#60a5fa");
+    grad.addColorStop(1, "#3b82f6");
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-12, -14);
+    ctx.lineTo(12, -14);
+    ctx.lineTo(16, 0);
+    ctx.lineTo(12, 14);
+    ctx.lineTo(-12, 14);
+    ctx.lineTo(-16, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // windshield
+    ctx.fillStyle = "#e0f2fe";
+    ctx.beginPath();
+    ctx.moveTo(-10, -10);
+    ctx.lineTo(10, -10);
+    ctx.lineTo(12, 0);
+    ctx.lineTo(-12, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawZombie(ctx, z) {
+    ctx.save();
+    ctx.translate(z.x, z.y);
+
+    // body circle
+    ctx.fillStyle = "#10b981"; // green-ish
+    ctx.beginPath();
+    ctx.arc(0, 0, z.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // face wobble
+    const w = Math.sin(z.wobble) * (z.r * 0.2);
+
+    // eyes
+    ctx.fillStyle = "#111827";
+    ctx.beginPath();
+    ctx.arc(-z.r * 0.35 + w, -z.r * 0.2, z.r * 0.15, 0, Math.PI * 2);
+    ctx.arc(z.r * 0.35 + w, -z.r * 0.2, z.r * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+
+    // mouth
+    ctx.strokeStyle = "#111827";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, z.r * 0.25, z.r * 0.35, 0, Math.PI);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawParticles(ctx, game) {
+    for (let i = game.particles.length - 1; i >= 0; i--) {
+      const p = game.particles[i];
+      ctx.globalAlpha = Math.max(0, p.life / 40);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, 2, 2);
+      ctx.globalAlpha = 1;
+      p.x += p.vx; p.y += p.vy; p.life -= 1;
+      if (p.life <= 0) game.particles.splice(i, 1);
+    }
+  }
+
+  function step(dt, ctx) {
+    const game = gameRef.current; if (!game) return;
+    const p = game.player;
+
+    // Input
+    const keys = keysRef.current;
+    const up = keys.has("arrowup") || keys.has("w");
+    const down = keys.has("arrowdown") || keys.has("s");
+    const left = keys.has("arrowleft") || keys.has("a");
+    const right = keys.has("arrowright") || keys.has("d");
+    const boost = keys.has("shift");
+
+    const accel = p.accel * (boost ? 1.4 : 1);
+
+    // Rotate toward movement for a car-like feel
+    let ax = 0, ay = 0;
+    if (up) ay -= accel;
+    if (down) ay += accel * 0.8; // reverse slightly weaker
+    if (left) ax -= accel;
+    if (right) ax += accel;
+
+    p.vx += ax; p.vy += ay;
+    const max = p.maxSpeed * (boost ? 1.2 : 1);
+    const speed = Math.hypot(p.vx, p.vy);
+    if (speed > max) { p.vx = (p.vx / speed) * max; p.vy = (p.vy / speed) * max; }
+
+    p.vx *= p.friction; p.vy *= p.friction;
+    p.x += p.vx; p.y += p.vy;
+    p.x = clamp(p.x, 14, WIDTH - 14);
+    p.y = clamp(p.y, 14, HEIGHT - 14);
+
+    if (speed > 0.2) { p.angle = Math.atan2(p.vy, p.vx); }
+
+    // Spawn zombies
+    game.time += dt;
+    if (game.time - game.lastSpawn > game.spawnEvery) {
+      spawnZombie(game);
+      game.lastSpawn = game.time;
+    }
+
+    // Move zombies toward player with slight wobble
+    for (let i = game.zombies.length - 1; i >= 0; i--) {
+      const z = game.zombies[i];
+      const dx = p.x - z.x; const dy = p.y - z.y; const d = Math.hypot(dx, dy) || 1;
+      const nx = dx / d; const ny = dy / d;
+      // wobble side movement
+      z.wobble += z.wobbleSpeed * dt;
+      const wx = Math.cos(z.wobble + i) * 0.3;
+      const wy = Math.sin(z.wobble + i) * 0.3;
+      z.x += (nx * z.speed + wx) * (dt * 0.06 * 60);
+      z.y += (ny * z.speed + wy) * (dt * 0.06 * 60);
+
+      // remove zombies far outside bounds to avoid buildup
+      if (z.x < -60 || z.x > WIDTH + 60 || z.y < -60 || z.y > HEIGHT + 60) {
+        game.zombies.splice(i, 1);
+        continue;
+      }
+
+      // Collision
+      const hit = dist({ x: z.x, y: z.y }, p) < z.r + 12;
+      if (hit) {
+        addParticles(game, p.x, p.y, "#ef4444", 30);
+        setState("gameover");
+        setRunning(false);
+        setPaused(false);
+        setBest(prev => {
+          const b = Math.max(prev, Math.floor(game.time / 10));
+          localStorage.setItem("zombie_dodge_best", String(b));
+          return b;
+        });
+        return; // end step on collision
+      }
+    }
+
+    // Particles
+    drawParticles(ctx, game);
+
+    // Scoring by survival time
+    const newScore = Math.floor(game.time / 10);
+    if (newScore !== score) setScore(newScore);
+  }
+
+  // Main loop
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    let raf = 0; let last = performance.now();
+
+    function loop(now) {
+      if (!running || paused || state !== "playing") { raf = requestAnimationFrame(loop); last = now; return; }
+      const dt = now - last; last = now;
+
+      // Clear
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+      // Background grid
+      ctx.fillStyle = "#0b1220"; ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      ctx.strokeStyle = "#0f1f3a"; ctx.lineWidth = 1;
+      for (let x = 0; x < WIDTH; x += 30) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, HEIGHT); ctx.stroke(); }
+      for (let y = 0; y < HEIGHT; y += 30) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(WIDTH, y); ctx.stroke(); }
+
+      // Decorative road lanes
+      ctx.strokeStyle = "#334155"; ctx.lineWidth = 4; ctx.setLineDash([18, 20]);
+      ctx.beginPath(); ctx.moveTo(0, HEIGHT * 0.33); ctx.lineTo(WIDTH, HEIGHT * 0.33); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, HEIGHT * 0.66); ctx.lineTo(WIDTH, HEIGHT * 0.66); ctx.stroke();
+      ctx.setLineDash([]);
+
+      const game = gameRef.current;
+      if (game) {
+        // Draw zombies behind car
+        for (const z of game.zombies) drawZombie(ctx, z);
+        // Draw car
+        drawCar(ctx, game.player);
+        // Step sim (also draws particles)
+        step(dt, ctx);
+      }
+
+      // UI Overlay
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "600 18px Inter, ui-sans-serif, system-ui";
+      ctx.fillText(`Score: ${score}`, 16, 28);
+      ctx.fillText(`Best: ${best}`, 16, 52);
+      ctx.fillText(`Zombies: ${gameRef.current?.zombies.length || 0}`, 16, 76);
+
+      raf = requestAnimationFrame(loop);
+    }
+
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [running, paused, state, score, best]);
+
+  // Start / Restart handlers
+  function startGame() {
+    initGame();
+    setState("playing");
+    setPaused(false);
+    setRunning(true);
+  }
+  function restartGame() { startGame(); }
+
+  // Pause/Resume via spacebar
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key.toLowerCase() === " ".trim() || e.code === "Space") {
+        if (state === "playing") setPaused((p) => !p);
+        e.preventDefault();
+      } else if (e.key.toLowerCase() === "r") {
+        if (state !== "menu") restartGame();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [state]);
+
+  // Fancy border color depending on state
+  const borderColor = state === "menu" ? "border-slate-600" : state === "playing" ? (paused ? "border-yellow-400" : "border-emerald-500") : "border-rose-500";
+
+  return (
+    <div className="w-full min-h-[100vh] bg-slate-900 text-slate-100 flex flex-col items-center gap-4 py-6 select-none">
+      <h1 className="text-3xl font-black tracking-tight">🧟‍♂️ Zombie Dodge — Car vs. Horde</h1>
+
+      <div className={`rounded-2xl shadow-xl p-3 border ${borderColor} bg-slate-950`}>
+        <canvas
+          ref={canvasRef}
+          width={WIDTH}
+          height={HEIGHT}
+          className="rounded-xl bg-slate-900"
+          onMouseDown={(e) => e.currentTarget.focus?.()}
+        />
+      </div>
+
+      {/* Controls / HUD */}
+      <div className="flex flex-wrap items-center justify-center gap-3">
+        {state === "menu" && (
+          <>
+            <label className="inline-flex items-center gap-2 text-sm bg-slate-800 rounded-xl px-3 py-2">
+              <span>Difficulty</span>
+              <select
+                className="bg-slate-700 rounded-lg px-2 py-1"
+                value={difficulty}
+                onChange={(e) => setDifficulty(e.target.value)}
+              >
+                <option>Easy</option>
+                <option>Normal</option>
+                <option>Hard</option>
+              </select>
+            </label>
+            <button onClick={startGame} className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-bold shadow">
+              ▶ Start
+            </button>
+          </>
+        )}
+
+        {state === "playing" && (
+          <>
+            <button onClick={() => setPaused((p) => !p)} className="px-4 py-2 rounded-xl bg-yellow-400 text-slate-900 font-bold shadow hover:brightness-110">
+              {paused ? "Resume" : "Pause"}
+            </button>
+            <button onClick={restartGame} className="px-4 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 font-semibold">
+              Restart (R)
+            </button>
+          </>
+        )}
+
+        {state === "gameover" && (
+          <>
+            <div className="px-4 py-2 rounded-xl bg-rose-600 font-bold">Game Over!</div>
+            <button onClick={restartGame} className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-bold shadow">
+              ↻ Try Again
+            </button>
+            <button onClick={() => { setState("menu"); setRunning(false); setPaused(false); }} className="px-4 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 font-semibold">
+              Back to Menu
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="text-sm text-slate-300 max-w-[900px] px-4 leading-relaxed">
+        <p className="mb-2"><strong>How to play:</strong> Use <span className="font-semibold">Arrow keys</span> or <span className="font-semibold">WASD</span> to drive the car and avoid the green zombies. Hold <span className="font-semibold">Shift</span> for a short speed boost. Survive as long as you can to increase your score. Press <span className="font-semibold">Space</span> to pause and <span className="font-semibold">R</span> to restart.</p>
+        <p className="opacity-80">Tip: Lead zombies into wide turns and use your boost sparingly. Your best score is saved locally in your browser.</p>
+      </div>
+
+      <footer className="text-xs text-slate-500">Built with React + Canvas. No external assets.</footer>
+    </div>
+  );
+}
